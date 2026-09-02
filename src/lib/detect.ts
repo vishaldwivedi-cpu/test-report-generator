@@ -3,13 +3,23 @@
 // exam / track / family / component / date detection.
 
 export const ALIASES: Record<string, string[]> = {
-  "Registration No": ["Roll No", "Registration No", "Registration Number", "Roll_No"],
+  "Registration No": [
+    "Roll No",
+    "Registration No",
+    "Registration Number",
+    "Roll_No",
+    "Reg No",
+    "Reg. No",
+    "Reg_No",
+    "RegNo",
+  ],
   "Student Name": ["Students_name", "Student Name", "Student_Name", "Name"],
   Vertical: ["Vertical"],
+  Batch: ["Batch", "Batch Code", "Batch_Code", "Batch Name", "Batch_Name", "BatchCode"],
   Region: ["Region"],
   Center: ["Center", "Centre"],
-  Rank: ["Rank", "All India Rank", "AIR Rank"],
-  Total: ["Total Marks", "Total_Marks", "Total", "Total Score"],
+  Rank: ["Rank", "All India Rank", "AIR Rank", "Offline Rank", "Offline_Rank"],
+  Total: ["Total Marks", "Total_Marks", "Total", "Total Score", "Score"],
   Physics: ["Physics Marks", "Phy Marks", "Physics", "Phy_Marks"],
   Chemistry: ["Chemistry Marks", "Chem Marks", "Chemistry", "Chem_Marks"],
   Maths: ["Maths Marks", "Math_Marks", "Maths", "Mathematics", "Mathematics Marks"],
@@ -17,6 +27,22 @@ export const ALIASES: Record<string, string[]> = {
   Zoology: ["Zoology Marks", "Zoo Marks", "Zoology", "Zoology_Marks"],
   "Paper 1": ["Adv. P:1", "Adv P1", "Adv. P1", "Paper 1", "P1", "P_1", "P1 Total", "Paper 1 Total"],
   "Paper 2": ["Adv. P:2", "Adv P2", "Adv. P2", "Paper 2", "P2", "P_2", "P2 Total", "Paper 2 Total"],
+};
+
+// Some exports (like PW's "Export" report tab) don't give raw subject marks -
+// they give a subject-wise Average % plus an "Out of" (max marks) column.
+// These aliases let us recognize that format so we can convert % -> marks by
+// splitting "Out of" equally across subjects. Kept separate from the raw-marks
+// aliases above so an "Avg. Physics" column is never mistaken for a raw
+// "Physics" marks column (and vice versa).
+export const MAX_MARKS_ALIASES = ["Out of", "Out Of", "OutOf", "Out_of", "Max Marks", "Full Marks"];
+
+export const AVG_PERCENT_ALIASES: Record<string, string[]> = {
+  Physics: ["Avg. Physics", "Avg Physics", "Avg. Physic", "Avg Phy", "Average Physics", "Physics %"],
+  Chemistry: ["Avg. Chemistry", "Avg Chemistry", "Avg. Chem", "Avg Chem", "Average Chemistry", "Chemistry %"],
+  Maths: ["Avg. Maths", "Avg Maths", "Avg. Math", "Avg Math", "Average Maths", "Maths %"],
+  Botany: ["Avg. Botany", "Avg Botany", "Avg. Bot", "Average Botany", "Botany %"],
+  Zoology: ["Avg. Zoology", "Avg Zoology", "Avg. Zoo", "Average Zoology", "Zoology %"],
 };
 
 const MONTHS: Record<string, number> = {
@@ -51,12 +77,41 @@ export function findCol(columns: string[], aliases: string[]): string | null {
   return null;
 }
 
+/** Strict version of findCol: only exact header matches, no substring fallback.
+ * Used to tell a true raw-marks column ("Physics") apart from a percentage
+ * column that merely contains the word ("Avg. Physics"). */
+export function findColExact(columns: string[], aliases: string[]): string | null {
+  const lookup = new Map<string, string>();
+  for (const c of columns) lookup.set(cleanCol(c).toLowerCase(), c);
+  for (const alias of aliases) {
+    const key = cleanCol(alias).toLowerCase();
+    if (lookup.has(key)) return lookup.get(key)!;
+  }
+  return null;
+}
+
 export function toNumber(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   const s = String(value).trim();
   if (s === "" || s.toLowerCase() === "nan" || s.toLowerCase() === "none") return null;
   const n = Number(s.replace(/,/g, ""));
   return Number.isFinite(n) ? n : null;
+}
+
+/** Parses a percentage value from either "96.00%" text or a raw fraction
+ * (e.g. 0.96 from an xlsx cell formatted as %). Always returns 0-100 scale. */
+export function toPercent(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const s = String(value).trim();
+  if (s === "" || s.toLowerCase() === "nan" || s.toLowerCase() === "none") return null;
+  if (s.endsWith("%")) {
+    const n = Number(s.slice(0, -1).replace(/,/g, ""));
+    return Number.isFinite(n) ? n : null;
+  }
+  const n = Number(s.replace(/,/g, ""));
+  if (!Number.isFinite(n)) return null;
+  // A bare fraction like 0.96 means 96%; a bare value like 96 already is one.
+  return n >= 0 && n <= 1 ? n * 100 : n;
 }
 
 export function normalizeVertical(value: unknown): string | null {
@@ -67,6 +122,30 @@ export function normalizeVertical(value: unknown): string | null {
   if (u === "AIR") return "AIR";
   if (u === "NON AIR") return "Non-AIR";
   return s;
+}
+
+/**
+ * Infers Vertical (AIR / Non-AIR / PS) from a batch code when the file has
+ * no Vertical column at all (common on percentage-format exports).
+ *
+ * Rules (checked in this order - a batch starting with letters is always
+ * PS, even though it may also happen to end in A):
+ *   - Starts directly with a letter, no leading number (e.g. "AJ11MA")  -> PS
+ *   - Ends with "P"  (e.g. "35-AJ121MP")                                -> AIR
+ *   - Ends with "A"  (e.g. "35-AJ121MA")                                -> Non-AIR
+ *   - Anything else (e.g. codes ending in M/V/E) -> unrecognized, null
+ */
+export function inferVerticalFromBatch(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const s = String(value).trim();
+  if (!s) return null;
+
+  if (/^[A-Za-z]/.test(s)) return "PS";
+
+  const last = s.charAt(s.length - 1).toUpperCase();
+  if (last === "P") return "AIR";
+  if (last === "A") return "Non-AIR";
+  return null;
 }
 
 /** Take the LAST valid day+month pair in the filename. */

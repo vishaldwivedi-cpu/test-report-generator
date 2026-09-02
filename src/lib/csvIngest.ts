@@ -1,10 +1,15 @@
 import {
   ALIASES,
+  AVG_PERCENT_ALIASES,
+  MAX_MARKS_ALIASES,
   cleanCol,
   findCol,
+  findColExact,
   inferComponent,
+  inferVerticalFromBatch,
   normalizeVertical,
   toNumber,
+  toPercent,
 } from "./detect";
 
 export type Track = "NEET" | "JEE_MAIN" | "JEE_ADVANCED";
@@ -81,6 +86,57 @@ function emptyRecord(registrationNo: string): NormalizedRecord {
   };
 }
 
+/**
+ * Some exports give subject-wise Average % (e.g. "Avg. Physics" = 96.00%)
+ * plus an "Out of" column, instead of raw subject marks. This detects that
+ * shape and derives raw marks by splitting "Out of" equally across the
+ * given subjects, then applying each subject's percentage - so e.g.
+ * Out of=300, 3 subjects -> 100 each; Avg. Physics 96% -> Physics = 96.
+ *
+ * If real raw-marks columns already exist for every subject, this is a
+ * no-op. Mutates `rows` in place and appends the derived column names
+ * (the canonical subject names, e.g. "Physics") onto `rawColumns` so the
+ * normal column-detection logic below picks them straight up.
+ */
+export function injectMarksFromPercentages(
+  rows: Record<string, string>[],
+  rawColumns: string[],
+  subjects: readonly string[],
+): { applied: boolean; addedColumns: string[] } {
+  const columns = rawColumns.map(cleanCol);
+
+  const hasAllRawMarks = subjects.every((s) => findColExact(columns, ALIASES[s]));
+  if (hasAllRawMarks) return { applied: false, addedColumns: [] };
+
+  const outOfCol = findCol(columns, MAX_MARKS_ALIASES);
+  if (!outOfCol) return { applied: false, addedColumns: [] };
+  const outOfRaw = rawColumns[columns.indexOf(outOfCol)];
+
+  const avgRawCols: Record<string, string> = {};
+  for (const s of subjects) {
+    const c = findCol(columns, AVG_PERCENT_ALIASES[s] ?? []);
+    if (!c) return { applied: false, addedColumns: [] };
+    avgRawCols[s] = rawColumns[columns.indexOf(c)];
+  }
+
+  const n = subjects.length;
+  for (const row of rows) {
+    const outOfVal = toNumber(row[outOfRaw]);
+    const perSubjectMax = outOfVal !== null ? outOfVal / n : null;
+    for (const s of subjects) {
+      const pct = toPercent(row[avgRawCols[s]]);
+      const marks =
+        pct !== null && perSubjectMax !== null
+          ? Math.round(((pct / 100) * perSubjectMax) * 100) / 100
+          : null;
+      row[s] = marks === null ? "" : String(marks);
+    }
+  }
+
+  rawColumns.push(...subjects);
+  return { applied: true, addedColumns: [...subjects] };
+}
+
 export function standardizeCsv(
   rows: Record<string, string>[],
   rawColumns: string[],
@@ -88,9 +144,17 @@ export function standardizeCsv(
   jeeType: "MAIN" | "ADVANCED",
   filename: string,
 ): StandardizeResult {
-  const columns = rawColumns.map(cleanCol);
+  const track: Track =
+    exam === "NEET" ? "NEET" : jeeType === "ADVANCED" ? "JEE_ADVANCED" : "JEE_MAIN";
+
+  const workingRawColumns = [...rawColumns];
+  const conversionSubjects =
+    track === "NEET" ? (["Physics", "Chemistry", "Botany", "Zoology"] as const) : (["Physics", "Chemistry", "Maths"] as const);
+  const conversion = injectMarksFromPercentages(rows, workingRawColumns, conversionSubjects);
+
+  const columns = workingRawColumns.map(cleanCol);
   const colMap = new Map<string, string>();
-  rawColumns.forEach((raw, i) => colMap.set(columns[i], raw));
+  workingRawColumns.forEach((raw, i) => colMap.set(columns[i], raw));
 
   const req = (field: string): string => {
     const col = findCol(columns, ALIASES[field]);
@@ -104,21 +168,28 @@ export function standardizeCsv(
 
   const regCol = req("Registration No");
   const nameCol = req("Student Name");
-  const verticalCol = req("Vertical");
+  const verticalCol = opt("Vertical");
   const centerCol = req("Center");
   const rankCol = req("Rank");
   const regionCol = opt("Region");
+  const batchCol = opt("Batch");
   const totalCol = opt("Total");
 
   const qaIssues: QaIssue[] = [];
-  const track: Track =
-    exam === "NEET" ? "NEET" : jeeType === "ADVANCED" ? "JEE_ADVANCED" : "JEE_MAIN";
+  if (conversion.applied) {
+    qaIssues.push({
+      issueType: "Percentage Converted to Marks",
+      registrationNo: "",
+      details: `No raw subject-marks columns found; derived ${conversion.addedColumns.join(", ")} by splitting the 'Out of' total equally across ${conversion.addedColumns.length} subjects and applying each subject's Avg. % column.`,
+    });
+  }
 
   const testType = exam === "NEET" ? "NEET" : jeeType;
   const component = inferComponent(filename, testType, columns);
 
   const byReg = new Map<string, NormalizedRecord[]>();
   let blankRegistrations = 0;
+  let verticalInferredFromBatch = 0;
 
   for (const row of rows) {
     const rawReg = row[regCol];
@@ -130,7 +201,15 @@ export function standardizeCsv(
 
     const rec = emptyRecord(reg);
     rec.studentName = row[nameCol] ?? null;
-    rec.vertical = normalizeVertical(row[verticalCol]);
+    const explicitVertical = verticalCol ? normalizeVertical(row[verticalCol]) : null;
+    if (explicitVertical) {
+      rec.vertical = explicitVertical;
+    } else if (batchCol) {
+      rec.vertical = inferVerticalFromBatch(row[batchCol]);
+      if (rec.vertical) verticalInferredFromBatch += 1;
+    } else {
+      rec.vertical = null;
+    }
     rec.region = regionCol ? (row[regionCol] ?? null) : null;
     rec.center = row[centerCol] ?? null;
     rec.rank = toNumber(row[rankCol]);
@@ -274,7 +353,7 @@ export function standardizeCsv(
           : [rec.physics, rec.chemistry, rec.maths];
       if (subjects.every((v) => v !== null) && rec.total !== null) {
         const sum = subjects.reduce((a: number, v) => a + (v ?? 0), 0);
-        if (Math.abs(sum - rec.total) > 1e-6) {
+        if (Math.abs(sum - rec.total) > 0.5) {
           qaIssues.push({
             issueType: "Total mismatch",
             registrationNo: rec.registrationNo,
@@ -283,6 +362,14 @@ export function standardizeCsv(
         }
       }
     }
+  }
+
+  if (verticalInferredFromBatch > 0) {
+    qaIssues.push({
+      issueType: "Vertical Inferred from Batch Code",
+      registrationNo: "",
+      details: `No Vertical value found for ${verticalInferredFromBatch} record(s); inferred from batch code (letter-first -> PS, ends in P -> AIR, ends in A -> Non-AIR).`,
+    });
   }
 
   if (derivedTotal) {

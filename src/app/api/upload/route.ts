@@ -2,6 +2,7 @@ import Papa from "papaparse";
 import { db } from "@/db";
 import { uploadedFiles, testRecords } from "@/db/schema";
 import { standardizeCsv } from "@/lib/csvIngest";
+import { parseXlsx } from "@/lib/xlsxIngest";
 import {
   inferClassLevel,
   inferComponent,
@@ -42,22 +43,36 @@ export async function POST(req: Request) {
   for (const file of files) {
     const filename = file.name;
     try {
-      const text = await file.text();
-      const parsed = Papa.parse<Record<string, string>>(text, {
-        header: true,
-        skipEmptyLines: true,
-        transformHeader: (h) => h.trim(),
-      });
+      const isExcel = /\.xlsx?$/i.test(filename);
 
-      if (parsed.errors?.length) {
-        const fatal = parsed.errors.filter((e) => e.type !== "FieldMismatch");
-        if (fatal.length && (!parsed.data || parsed.data.length === 0)) {
-          throw new Error(fatal[0].message);
+      let columns: string[];
+      let data: Record<string, string>[];
+
+      if (isExcel) {
+        const buffer = await file.arrayBuffer();
+        const sheet = await parseXlsx(buffer);
+        columns = sheet.columns;
+        data = sheet.rows;
+      } else {
+        const text = await file.text();
+        const parsed = Papa.parse<Record<string, string>>(text, {
+          header: true,
+          skipEmptyLines: true,
+          transformHeader: (h) => h.trim(),
+        });
+
+        if (parsed.errors?.length) {
+          const fatal = parsed.errors.filter((e) => e.type !== "FieldMismatch");
+          if (fatal.length && (!parsed.data || parsed.data.length === 0)) {
+            throw new Error(fatal[0].message);
+          }
         }
+
+        columns = parsed.meta.fields ?? [];
+        data = parsed.data;
       }
 
-      const columns = parsed.meta.fields ?? [];
-      if (!columns.length) throw new Error("Could not detect any columns in CSV header.");
+      if (!columns.length) throw new Error("Could not detect any columns in the file header.");
 
       const exam = (examOverride === "NEET" || examOverride === "JEE" ? examOverride : inferExam(filename)) as
         | "NEET"
@@ -78,7 +93,7 @@ export async function POST(req: Request) {
       const testType = exam === "NEET" ? "NEET" : jeeType;
       const component = inferComponent(filename, testType, columns);
 
-      const result = standardizeCsv(parsed.data, columns, exam, jeeType, filename);
+      const result = standardizeCsv(data, columns, exam, jeeType, filename);
 
       const [fileRow] = await db
         .insert(uploadedFiles)

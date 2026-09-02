@@ -52,9 +52,9 @@ export default function UploadPanel({ onUploaded }: { onUploaded: () => void }) 
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-      <h2 className="text-lg font-semibold text-slate-900">Upload Test CSVs</h2>
+      <h2 className="text-lg font-semibold text-slate-900">Upload Test Files</h2>
       <p className="mt-1 text-sm text-slate-600">
-        Drop NEET or JEE (Main/Advanced) result CSVs here. The system auto-detects exam, track,
+        Drop NEET or JEE (Main/Advanced) result CSV or Excel files here. The system auto-detects exam, track,
         component (Paper 1/2), date, and{" "}
         <span className="font-medium text-slate-800">class level (11th / 12th / Dropper)</span> from the
         filename. Delete a file any time and it disappears from the next report.
@@ -94,13 +94,13 @@ export default function UploadPanel({ onUploaded }: { onUploaded: () => void }) 
         <input
           ref={inputRef}
           type="file"
-          accept=".csv"
+          accept=".csv,.xlsx,.xls"
           multiple
           className="hidden"
           onChange={(e) => handleFiles(e.target.files)}
         />
         <p className="text-sm font-medium text-slate-700">
-          {uploading ? "Uploading & parsing…" : "Click to browse or drag & drop CSV files"}
+          {uploading ? "Uploading & parsing…" : "Click to browse or drag & drop CSV or Excel files"}
         </p>
         <p className="mt-1 text-xs text-slate-500">Multiple files supported — e.g. Paper 1 & Paper 2 for the same Advanced test.</p>
       </div>
